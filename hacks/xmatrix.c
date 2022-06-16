@@ -56,6 +56,8 @@
 #include "textclient.h"
 #include "ximage-loader.h"
 #include <stdio.h>
+#include <string.h>
+#include <errno.h>
 #include <sys/wait.h>
 
 #ifndef HAVE_JWXYZ
@@ -203,7 +205,8 @@ typedef struct {
   int cursor_x, cursor_y;
   XtIntervalId cursor_timer;
 
-  Pixmap images[CHAR_MAPS];
+  Pixmap images[CHAR_MAPS][10];
+  int numColors;
   int image_width, image_height;
   Bool images_flipped_p;
 
@@ -215,6 +218,23 @@ typedef struct {
 } m_state;
 
 
+static int max_color_channel(long color)
+{
+  int max, r, g;
+  max = color & 0xFF;
+  g = (color & 0xFF00) >> 8;
+  if (g > max)
+  {
+    max = g;
+  }
+  r = (color & 0xFF0000) >> 16;
+  if (r > max)
+  {
+    max = r;
+  }
+  return max;
+}
+
 static void
 load_images_1 (Display *dpy, m_state *state, int which)
 {
@@ -224,66 +244,92 @@ load_images_1 (Display *dpy, m_state *state, int which)
   unsigned short int dark_val, light_val;
   int x, y;
   const char *shift_text = get_string_resource(dpy, "colorShift", "String");
-  XGCValues gcv;
-  GC gc;
-  XImage *ximg;
-
-  if (which == 1)
-    {
-      if (state->small_p)
-        png = matrix1b_png, size = sizeof(matrix1b_png);
-      else
-        png = matrix1_png, size = sizeof(matrix1_png);
-    }
-  else
-    {
-      if (state->small_p)
-        png = matrix2b_png, size = sizeof(matrix2b_png);
-      else
-        png = matrix2_png, size = sizeof(matrix2_png);
-    }
-  state->images[which] =
-    image_data_to_pixmap (state->dpy, state->window, png, size,
-                          &state->image_width, &state->image_height, 0);
-  
-  ximg = XGetImage (state->dpy, state->images[which], 0, 0, state->image_width, state->image_height, AllPlanes, ZPixmap);
-  /*fprintf(stderr, "XImage dimensions: %d : %d\n", ximg->width, ximg->height);
-  fprintf(stderr, "XImage color masks: Red[%lu] : Green[%lu] : Blue[%lu]\n", ximg->red_mask, ximg->green_mask, ximg->blue_mask);
-  fprintf(stderr, "XImage depth: %d, Bits per pixel: %d\n", ximg->depth, ximg->bits_per_pixel);*/
-  
   if (shift_text != NULL)
   {
-	  for (y = 0; y < ximg->height; y++)
-	  {
-		  for (x = 0; x < ximg->width; x++)
-		  {
-			  pixel = XGetPixel(ximg, x, y);
-			  /*fprintf(stderr, "Pixel %d, %d: %lX\n", x, y, pixel);*/
-			  dark_val = (pixel & 0xff);
-			  light_val = (pixel & 0xff00) >> 8;
-			  /*fprintf(stderr, "Colors: red[%X], green[%X], blue[%X]\n", red, green, blue);*/
-			  if (!strcasecmp(shift_text, "yellow"))
-				pixel = (light_val << 16) | (light_val << 8) | (dark_val);
-			  else if (!strcasecmp(shift_text, "red"))
-			    pixel = (light_val << 16) | (dark_val << 8) | (dark_val);
-			  else if (!strcasecmp(shift_text, "purple"))
-			    pixel = (light_val << 16) | (dark_val << 8) | (light_val);
-			  else if (!strcasecmp(shift_text, "blue"))
-			    pixel = (dark_val << 16) | (dark_val << 8) | (light_val);
-			  else if (!strcasecmp(shift_text, "aqua"))
-			    pixel = (dark_val << 16) | (light_val << 8) | (light_val);
-			  else if (!strcasecmp(shift_text, "white"))
-			    pixel = (light_val << 16) | (light_val << 8) | (light_val);
-			  else if (!strcasecmp(shift_text, "grey"))
-			    pixel = (dark_val << 16) | (dark_val << 8) | (dark_val);
-			  /*fprintf(stderr, "New Pixel: %lX\n", pixel);*/
-			  XPutPixel(ximg, x, y, pixel);
-		  }
-	  }
-	  gc = XCreateGC (dpy, state->images[which], 0, &gcv);
-	  XPutImage (dpy, state->images[which], gc, ximg, 0, 0, 0, 0, ximg->width, ximg->height);
-	  XFreeGC (dpy, gc);
-	  XDestroyImage(ximg);
+    state->numColors = (strlen(shift_text) + 1) / 7;
+  }
+  else
+  {
+    state->numColors = 0;
+  }
+  if (state->numColors > 10)
+  {
+    state->numColors = 10;
+  }
+  int colors[10] = { 0xFFFFFF, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
+  int i, ci;
+  for (i = 0; i < state->numColors; i++)
+  {
+    char color[7] = "";
+    for (ci = (i * 7); ci < i * 7 + 7; ci++)
+    {
+      color[ci - (i * 7)] = shift_text[ci];
+    }
+    color[6] = 0;
+    errno = 0;
+    colors[i] = strtol(color, NULL, 16);
+    if (errno != 0)
+    {
+      fprintf(stderr, "Color %d: invalid string %s\n", i, color);
+      colors[i] = 0xFFFFFF;
+    }
+    else
+    {
+      fprintf(stdout, "Color %d is %s\n", i, color);
+    }
+  }
+  if (state->numColors < 1)
+  {
+    state->numColors = 1;
+  }
+
+  int imgIndex;
+  for (imgIndex = 0; imgIndex < state->numColors; imgIndex++) {
+      XGCValues gcv;
+      GC gc;
+      XImage *ximg;
+
+      if (which == 1)
+        {
+          if (state->small_p)
+            png = matrix1b_png, size = sizeof(matrix1b_png);
+          else
+            png = matrix1_png, size = sizeof(matrix1_png);
+        }
+      else
+        {
+          if (state->small_p)
+            png = matrix2b_png, size = sizeof(matrix2b_png);
+          else
+            png = matrix2_png, size = sizeof(matrix2_png);
+        }
+      state->images[which][imgIndex] =
+        image_data_to_pixmap (state->dpy, state->window, png, size,
+                              &state->image_width, &state->image_height, 0);
+      
+      ximg = XGetImage (state->dpy, state->images[which][imgIndex], 0, 0, state->image_width, state->image_height, AllPlanes, ZPixmap);
+      /*fprintf(stderr, "XImage dimensions: %d : %d\n", ximg->width, ximg->height);
+      fprintf(stderr, "XImage color masks: Red[%lu] : Green[%lu] : Blue[%lu]\n", ximg->red_mask, ximg->green_mask, ximg->blue_mask);
+      fprintf(stderr, "XImage depth: %d, Bits per pixel: %d\n", ximg->depth, ximg->bits_per_pixel);*/
+      
+      int lastcindex = -99;
+      for (y = 0; y < ximg->height; y++)
+      {
+          //int cIndex = y / (ximg->height / numColors);
+          int color = colors[imgIndex];
+          for (x = 0; x < ximg->width; x++)
+          {
+              pixel = XGetPixel(ximg, x, y);
+              int maxChannel = max_color_channel(pixel);
+              pixel = maxChannel | (maxChannel << 8) | (maxChannel << 16);
+              pixel = pixel & color;
+              XPutPixel(ximg, x, y, pixel);
+          }
+      }
+      gc = XCreateGC (dpy, state->images[which][imgIndex], 0, &gcv);
+      XPutImage (dpy, state->images[which][imgIndex], gc, ximg, 0, 0, 0, 0, ximg->width, ximg->height);
+      XFreeGC (dpy, gc);
+      XDestroyImage(ximg);
   }
 }
 
@@ -299,28 +345,32 @@ load_images (Display *dpy, m_state *state)
 static void
 flip_images_1 (m_state *state, int which)
 {
-  XImage *im = XGetImage (state->dpy, state->images[which], 0, 0,
-                          state->image_width, state->image_height,
-                          ~0L, (state->xgwa.depth > 1 ? ZPixmap : XYPixmap));
-  int x, y, xx;
-  int ww = state->char_width;
-  unsigned long *row = (unsigned long *) malloc (sizeof(*row) * ww);
+  int i;
+  for (i = 0; i < state->numColors; i++) {
 
-  for (y = 0; y < state->image_height; y++)
-    {
-      for (x = 0; x < CHAR_COLS; x++)
+      XImage *im = XGetImage (state->dpy, state->images[which][i], 0, 0,
+                              state->image_width, state->image_height,
+                              ~0L, (state->xgwa.depth > 1 ? ZPixmap : XYPixmap));
+      int x, y, xx;
+      int ww = state->char_width;
+      unsigned long *row = (unsigned long *) malloc (sizeof(*row) * ww);
+
+      for (y = 0; y < state->image_height; y++)
         {
-          for (xx = 0; xx < ww; xx++)
-            row[xx] = XGetPixel (im, (x * ww) + xx, y);
-          for (xx = 0; xx < ww; xx++)
-            XPutPixel (im, (x * ww) + xx, y, row[ww - xx - 1]);
+          for (x = 0; x < CHAR_COLS; x++)
+            {
+              for (xx = 0; xx < ww; xx++)
+                row[xx] = XGetPixel (im, (x * ww) + xx, y);
+              for (xx = 0; xx < ww; xx++)
+                XPutPixel (im, (x * ww) + xx, y, row[ww - xx - 1]);
+            }
         }
-    }
 
-  XPutImage (state->dpy, state->images[which], state->draw_gc, im, 0, 0, 0, 0,
-             state->image_width, state->image_height);
-  XDestroyImage (im);
-  free (row);
+      XPutImage (state->dpy, state->images[which][i], state->draw_gc, im, 0, 0, 0, 0,
+                 state->image_width, state->image_height);
+      XDestroyImage (im);
+      free (row);
+  }
 }
 
 static void
@@ -1039,11 +1089,17 @@ feed_matrix (m_state *state)
 static void
 redraw_cells (m_state *state, Bool active)
 {
-  int x, y;
+  int x, y, cIndex;
   int count = 0;
   Bool use_back_p = False;
 
-  for (y = 0; y < state->grid_height; y++)
+  for (y = 0; y < state->grid_height; y++) 
+  {
+    cIndex = y / (state->grid_height / state->numColors);
+    if (cIndex >= state->numColors)
+    {
+        cIndex = state->numColors - 1;
+    }
     for (x = 0; x < state->grid_width; x++)
       {
         m_cell *cell = &state->cells[state->grid_width * y + x];
@@ -1105,7 +1161,7 @@ redraw_cells (m_state *state, Bool active)
             int map = ((cell->glow != 0 || cell->spinner) ? GLOW_MAP :
                        PLAIN_MAP);
 
-            XCopyArea (state->dpy, state->images[map],
+            XCopyArea (state->dpy, state->images[map][cIndex],
                        state->window, state->draw_gc,
                        cx * state->char_width,
                        cy * state->char_height,
@@ -1115,7 +1171,9 @@ redraw_cells (m_state *state, Bool active)
                        (y + state->top_margin)  * state->char_height);
           }
         if (!use_back_p)
-        cell->changed = 0;
+        {
+            cell->changed = 0;
+        }
 
         if (cell->glow > 0 && state->mode != NMAP && !use_back_p)
           {
@@ -1131,6 +1189,7 @@ redraw_cells (m_state *state, Bool active)
             cell->changed = 1;
           }
       }
+  }
 }
 
 
@@ -1861,7 +1920,7 @@ static void
 xmatrix_free (Display *dpy, Window window, void *closure)
 {
   m_state *state = (m_state *) closure;
-  int i;
+  int i, ci;
   if (state->tc)
     textclient_close (state->tc);
   if (state->cursor_timer)
@@ -1874,7 +1933,8 @@ xmatrix_free (Display *dpy, Window window, void *closure)
   free (state->feeders);
   if (state->tracing) free (state->tracing);
   for (i = 0; i < CHAR_MAPS; i++)
-    if (state->images[i]) XFreePixmap (dpy, state->images[i]);
+    for (ci = 0; ci < state->numColors; ci++)
+        if (state->images[i][ci]) XFreePixmap (dpy, state->images[i][ci]);
   free (state);
 }
 
