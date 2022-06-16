@@ -75,6 +75,9 @@
 #define PLAIN_MAP 1
 #define GLOW_MAP  2
 
+#define MAX_IMG_COLORS 128
+#define MAX_COLOR_BANDS 128
+
 typedef struct {
            int glow    : 8;
   unsigned int glyph   : 9;  /* note: 9 bit characters! */
@@ -205,8 +208,11 @@ typedef struct {
   int cursor_x, cursor_y;
   XtIntervalId cursor_timer;
 
-  Pixmap images[CHAR_MAPS][10];
-  int numColors;
+  Pixmap images[CHAR_MAPS][MAX_IMG_COLORS];
+  short numBands;
+  short numColors;
+  // colorBands[bandIndex] = image index
+  short colorBands[MAX_COLOR_BANDS];
   int image_width, image_height;
   Bool images_flipped_p;
 
@@ -241,48 +247,85 @@ load_images_1 (Display *dpy, m_state *state, int which)
   const unsigned char *png = 0;
   unsigned long size = 0;
   unsigned long pixel;
-  unsigned short int dark_val, light_val;
-  int x, y;
+  int x, y, i, ci;
+  int colors[64] = {-1};
+  state->numColors = 0;
+  for (i = 0; i < GLOW_MAP; i++)
+  {
+    state->colorBands[i] = 0;
+  }
+  for (i = 0; i < MAX_IMG_COLORS; i++)
+  {
+    state->images[which][i] = 0;
+  }
   const char *shift_text = get_string_resource(dpy, "colorShift", "String");
   if (shift_text != NULL)
   {
-    state->numColors = (strlen(shift_text) + 1) / 7;
+    state->numBands = (strlen(shift_text) + 1) / 7;
+    if (state->numBands > MAX_COLOR_BANDS)
+    {
+      state->numBands = MAX_COLOR_BANDS;
+    }
   }
   else
   {
-    state->numColors = 0;
+    state->numBands = 1;
   }
-  if (state->numColors > 10)
+  //fprintf(stdout, "Reading %d color bands\n", state->numBands);
+  for (i = 0; i < state->numBands; i++)
   {
-    state->numColors = 10;
-  }
-  int colors[10] = { 0xFFFFFF, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
-  int i, ci;
-  for (i = 0; i < state->numColors; i++)
-  {
-    char color[7] = "";
+    // For each color, read its value and find or create an adjusted image
+    // index:
+    int colorVal;
+    int colorIdx = -1;
+    char colorStr[7] = "";
     for (ci = (i * 7); ci < i * 7 + 7; ci++)
     {
-      color[ci - (i * 7)] = shift_text[ci];
+      colorStr[ci - (i * 7)] = shift_text[ci];
     }
-    color[6] = 0;
+    colorStr[6] = 0;
+
     errno = 0;
-    colors[i] = strtol(color, NULL, 16);
+    colorVal = strtol(colorStr, NULL, 16);
     if (errno != 0)
     {
-      fprintf(stderr, "Color %d: invalid string %s\n", i, color);
-      colors[i] = 0xFFFFFF;
+      fprintf(stderr, "Color band %d: invalid string %s\n", i, colorStr);
+      colorVal = 0xFFFFFF;
     }
-    else
+    // Find if the color already has an index:
+    for (ci = 0; ci < state->numColors; ci++)
     {
-      fprintf(stdout, "Color %d is %s\n", i, color);
+      if (colors[ci] == colorVal)
+      {
+        colorIdx = ci;
+        break;
+      }
     }
+    if (colorIdx == -1) // assign new color
+    {
+        if (state->numColors >= MAX_IMG_COLORS)
+        {
+            fprintf(stderr, "Reached color limit at %d colors, unable to assign color %s to band %d\n",
+                    MAX_IMG_COLORS, colorStr, i);
+            colorIdx = 0;
+        }
+        else
+        {
+            //fprintf(stdout, "Assigning color %s to index %d\n", colorStr, state->numColors);
+            colors[state->numColors] = colorVal;
+            colorIdx = state->numColors;
+            state->numColors++;
+        }
+    }
+    state->colorBands[i] = colorIdx;
   }
-  if (state->numColors < 1)
+  //fprintf(stdout, "Found %d bands with %d colors\n", state->numBands, state->numColors);
+  if (state->numColors == 0) // Not using color bands, use one set of unaltered images
   {
+    state->numBands = 1;
     state->numColors = 1;
+    colors[0] = -1;
   }
-
   int imgIndex;
   for (imgIndex = 0; imgIndex < state->numColors; imgIndex++) {
       XGCValues gcv;
@@ -308,22 +351,21 @@ load_images_1 (Display *dpy, m_state *state, int which)
                               &state->image_width, &state->image_height, 0);
       
       ximg = XGetImage (state->dpy, state->images[which][imgIndex], 0, 0, state->image_width, state->image_height, AllPlanes, ZPixmap);
-      /*fprintf(stderr, "XImage dimensions: %d : %d\n", ximg->width, ximg->height);
-      fprintf(stderr, "XImage color masks: Red[%lu] : Green[%lu] : Blue[%lu]\n", ximg->red_mask, ximg->green_mask, ximg->blue_mask);
-      fprintf(stderr, "XImage depth: %d, Bits per pixel: %d\n", ximg->depth, ximg->bits_per_pixel);*/
       
-      int lastcindex = -99;
-      for (y = 0; y < ximg->height; y++)
+      int color = colors[imgIndex];
+      if (color != -1) // if color is -1, use the image with no altered colors
       {
-          //int cIndex = y / (ximg->height / numColors);
-          int color = colors[imgIndex];
-          for (x = 0; x < ximg->width; x++)
+          //fprintf(stdout, "Initializing image %d with color %d\n", imgIndex, colors[imgIndex]);
+          for (y = 0; y < ximg->height; y++)
           {
-              pixel = XGetPixel(ximg, x, y);
-              int maxChannel = max_color_channel(pixel);
-              pixel = maxChannel | (maxChannel << 8) | (maxChannel << 16);
-              pixel = pixel & color;
-              XPutPixel(ximg, x, y, pixel);
+              for (x = 0; x < ximg->width; x++)
+              {
+                  pixel = XGetPixel(ximg, x, y);
+                  int maxChannel = max_color_channel(pixel);
+                  pixel = maxChannel | (maxChannel << 8) | (maxChannel << 16);
+                  pixel = pixel & color;
+                  XPutPixel(ximg, x, y, pixel);
+              }
           }
       }
       gc = XCreateGC (dpy, state->images[which][imgIndex], 0, &gcv);
@@ -1089,16 +1131,22 @@ feed_matrix (m_state *state)
 static void
 redraw_cells (m_state *state, Bool active)
 {
-  int x, y, cIndex;
+  int x, y, cIndex, bandIndex;
   int count = 0;
   Bool use_back_p = False;
+  int lastIdx = -2;
 
   for (y = 0; y < state->grid_height; y++) 
   {
-    cIndex = y / (state->grid_height / state->numColors);
-    if (cIndex >= state->numColors)
+    bandIndex = y / (state->grid_height / state->numBands);
+    if (bandIndex >= state->numBands)
     {
-        cIndex = state->numColors - 1;
+        bandIndex = state->numBands - 1;
+    }
+    cIndex = state->colorBands[bandIndex];
+    if (cIndex != lastIdx) {
+        fprintf(stdout, "band %d, y=%d/%d: using color %d\n", bandIndex, y, state->grid_height, cIndex);
+        lastIdx = cIndex;
     }
     for (x = 0; x < state->grid_width; x++)
       {
